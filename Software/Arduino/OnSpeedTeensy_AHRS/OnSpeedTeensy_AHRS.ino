@@ -695,7 +695,6 @@ if (!volumeControl)
   switchState=false;
   switchOnOff();
 
-  Serial.println(BAUDRATE_CONSOLE);
   Serial.begin(BAUDRATE_CONSOLE);   //Init hardware serial port (ouput to computer for debug)
 
   #ifdef WIFI
@@ -748,7 +747,6 @@ if (!volumeControl)
 
   if (serialOutFormat=="ALTENCODER" && serialOutPort=="Serial3")
                         {
-                          Serial.println("Initialize Serial3");
                         Serial3.begin(9600);
                         }                      
     
@@ -1128,6 +1126,7 @@ serialCmdChar = Serial.read();
                                                                   long P45Total=0;
                                                                   for (int i=1;i<=1000;i++)
                                                                       {
+                                                                      if (i%250==0) watchdogRefresh();
                                                                       PfwdTotal+=GetPressurePfwd();
                                                                       P45Total+=GetPressureP45();
                                                                       delay(10);
@@ -1424,7 +1423,7 @@ if (serialOutPort!="NONE" && millis()-serialoutLastUpdate>200) // update every 2
                   Serial5.print(serialCRC,HEX);
                   Serial5.println();                  
                   } else
-                        if (serialOutPort=="Serial3")
+                        if (serialOutPort=="Serial3" && serialOutFormat=="G3X")
                             {
                              if (!Serial3) 
                                 {
@@ -1444,35 +1443,34 @@ if (serialOutPort!="NONE" && millis()-serialoutLastUpdate>200) // update every 2
                                       Serial1.print(serialCRC,HEX);
                                       Serial1.println();
                                       }
+                                      
                   serialoutLastUpdate=millis();
                   
               } else
-                    if (serialOutFormat == "ONSPEED")
+                    if (serialOutFormat == "ONSPEED") 
                         {
                         // send ONSPEED formatted data
-                        }
                         
-              } else
-                    if (serialOutFormat == "ALTENCODER")
-                        {                    
-                          Serial.println("In ALTENCODER function");      
-                        // send Altitude Encoder formatted data
-                        char altEncoderString[9];
-                        float smoothingAlpha=2.0/(serialDisplaySmoothing+1);
-
-                        noInterrupts();
-                        if (PaltSmoothed==0) PaltSmoothed=Palt; else PaltSmoothed=Palt * smoothingAlpha/10+ (1-smoothingAlpha/10)*PaltSmoothed; // increased smoothing needed
-                        interrupts();
-                        sprintf(altEncoderString,"ALT %05i", int(PaltSmoothed));
-                        Serial.print(altEncoderString);
-                        
-                        if (serialOutPort=="Serial3")
-                            {                   
-                            Serial3.print(altEncoderString);
-                            }
-                        serialoutLastUpdate=millis();
-                        }
-    
+                        } else
+                              if (serialOutFormat == "ALTENCODER")
+                                  {                        
+                                  // send Altitude Encoder formatted data
+                                  char altEncoderString[9];
+                                  float smoothingAlpha=2.0/(serialDisplaySmoothing+1);
+          
+                                  noInterrupts();
+                                  if (PaltSmoothed==0) PaltSmoothed=Palt; else PaltSmoothed=Palt * smoothingAlpha/10+ (1-smoothingAlpha/10)*PaltSmoothed; // increased smoothing needed
+                                  interrupts();
+                                  sprintf(altEncoderString,"ALT %05i", int(PaltSmoothed));
+                                  
+                                  if (serialOutPort=="Serial3")
+                                      {                   
+                                      Serial3.println(altEncoderString);
+                                      }
+                                  serialoutLastUpdate=millis();
+                                  }
+    }
+        
 
 if (sendDisplayData && millis()-displayDataLastUpdate>100) // update every 100ms (10Hz)
     {
@@ -2668,7 +2666,7 @@ unsigned long waitStart=micros();
 while ((Wire.available() < 2) && (micros()-waitStart<timeout)){}
         
   if (micros()-waitStart >=timeout)
-          {           
+          {        
           return -1;
           }
     reading = Wire.read(); // byte 1
