@@ -15,7 +15,8 @@
 //      https://github.com/flyonspeed/OnSpeed-Gen2/
 
 // reminder: check for dvision by zero in PCOEFF/CalcAOA
-#define VERSION           "v3.1.5"      // 11/5/2020 boom debug displays raw counts from boom data
+#define VERSION           "v3.1.6"      // 01/04/2021 added oat, tas, efis port selection, G5 GPS read
+                          //"v3.1.5"      // 11/5/2020 boom debug displays raw counts from boom data
                           //"v3.1.4"      // 10/23/2020 energy display improvements
                           //"v3.1.3"    // 10/7/2020 added serial display data smoothing, constrained %lift to 0-99%
                           //"v3.1.2"    // 9/29/2020 kick the dog during file transfer, fixed verticalG rounding
@@ -80,7 +81,8 @@
 //#define TONEDEBUG // show tone related debug info
 //#define SDCARDDEBUG  // show SD writing debug info
 //#define VOLUMEDEBUG  // show audio volume info
-//#define AXISDEBUG //show accelerometer axis configuration
+//#define AXISDEBUG //show accelerometer axis 
+//#define GPSDATADEBUG
 
 
 // box functionality config
@@ -112,7 +114,8 @@ bool configLoaded=false;
 
 //serial inputs
 bool readBoom; // boom connected to Serial 1
-bool readEfisData; // Serial3, read and log serial data (ahrs/aoa/airspeed/altitude data from Dynon EFIS D10, D100, D180, Skyview/ADVANCED, Garmin G5 and G3X)
+bool readEfisData; // read and log serial data (ahrs/aoa/airspeed/altitude data from Dynon EFIS D10, D100, D180, Skyview/ADVANCED, Garmin G5 and G3X)
+HardwareSerial *serialIn;
 
 // serial output
 String serialOutFormat;
@@ -268,6 +271,9 @@ volatile double coeffP; // coefficient of pressure
 #define RANGESWEEP_HIGH_AOA   15
 #define RANGESWEEP_STEP       .1 // degrees AOA
 
+// oat defines
+#define OAT_SERIES_RESISTOR 10000
+
 //﻿DB15 pinout (Gen2 v3 hardware)
 //1 - 14V +PWR
 //2 - EFIS Serial RX
@@ -371,6 +377,7 @@ volatile float efisVerticalG=0.00;
 volatile int efisPercentLift=0;
 volatile int efisPalt=0;
 volatile int efisVSI=0;
+volatile float efisAltSetting;
 volatile float efisTAS;
 volatile float efisOAT;
 volatile float efisFuelRemaining=0.00;
@@ -382,6 +389,7 @@ volatile int efisHeading=-1;
 String efisTime="";
 volatile unsigned long efisTimestamp=millis();
 String efisType="";
+String efisPort="";
 
 unsigned long lastReceivedEfisTime;
 int efis_bufferIndex=0;
@@ -411,8 +419,31 @@ int parse_array[4];
 int parse_array_index=0;
 char parseBuffer[10];
 int parseBufferSize=0;
- 
 
+
+// GPS variables
+volatile float gpsLat;
+volatile float gpsLong;
+String gpsPosStatus;
+volatile int gpsAlt;
+volatile float gpsVelocityEW;
+volatile float gpsVelocityNS;
+volatile float gpsVelocity;
+volatile float gpsTrack;
+volatile float gpsVerticalVelocity;
+String gpsDate;
+
+
+// OAT variables
+bool readOat; // Is OAT enabled?
+String oatSensorType; // Implemented: Littelfuse UPS10981 (NTC Thermistor)
+volatile float analogOat;
+
+
+// TAS variables
+#define R_AIR 287.058 // Specific Gas Constant of Air
+#define RHO_0 1225 //kg/m^3
+volatile float calculatedTas;
 
 OneButton Switch(SWITCH_PIN, true);  // pin 2  used for the switch input
 
@@ -616,7 +647,9 @@ if (!volumeControl)
                             SensorFile.print(",VerticalG,LateralG,ForwardG,RollRate,PitchRate,YawRate,Pitch,Roll");
                             #endif        
                             if (readBoom) SensorFile.print(",boomStatic,boomDynamic,boomAlpha,boomBeta,boomIAS,boomAge");                     
-                            if (readEfisData) SensorFile.print(",efisIAS,efisPitch,efisRoll,efisLateralG,efisVerticalG,efisPercentLift,efisPalt,efisVSI,efisTAS,efisOAT,efisFuelRemaining,efisFuelFlow,efisMAP,efisRPM,efisPercentPower,efisMagHeading,efisAge,efisTime");          
+                            if (readEfisData) SensorFile.print(",efisIAS,efisPitch,efisRoll,efisLateralG,efisVerticalG,efisPercentLift,efisPalt,efisVSI,efisTAS,efisOAT,efisFuelRemaining,efisFuelFlow,efisMAP,efisRPM,efisPercentPower,efisMagHeading,efisAltSetting,efisAge,efisTime");  
+                            if (efisType="GARMING5") SensorFile.print(",gpsDate,gpsLat,gpsLong,gpsTrack,gpsVelocity");
+                            if (readOat) SensorFile.print(",analogOat,calculatedTas");         
                             SensorFile.println();
                             SensorFile.close();
                             }  else Serial.print("SensorFile opening error");        
@@ -662,7 +695,7 @@ if (!volumeControl)
   switchState=false;
   switchOnOff();
 
-  
+  Serial.println(BAUDRATE_CONSOLE);
   Serial.begin(BAUDRATE_CONSOLE);   //Init hardware serial port (ouput to computer for debug)
 
   #ifdef WIFI
@@ -672,7 +705,30 @@ if (!volumeControl)
   if (readBoom) Serial1.begin(BAUDRATE_BOOM);  //Init hardware serial port (input from BOOM)
 
 
-  if (readEfisData) Serial3.begin(BAUDRATE_EFIS); //Init hardware serial port (input from EFIS)
+  if (readEfisData) 
+                          {
+                          if (efisPort=="Serial3") 
+                              {                             
+                                serialIn = &Serial3;
+                              }
+
+                          if (efisPort=="Serial2") 
+                              {
+                                serialIn = &Serial2;                                
+                              }
+
+                          // efisPort could be balnk, so let's not go crazy just yet. 
+                          if (efisPort!="")
+                              { 
+                                serialIn->begin(BAUDRATE_EFIS); //Init hardware serial port (input from EFIS)
+                              } else
+                                {
+                                  Serial.println("efisPort not defined. Defaulting to Serial3");
+                                  serialIn = &Serial3;
+                                  serialIn->begin(BAUDRATE_EFIS); //Init hardware serial port (input from EFIS)
+                                }
+                          
+                          }
 
 
   if (serialOutFormat!="NONE" && serialOutPort=="Serial5")
@@ -689,6 +745,12 @@ if (!volumeControl)
                         {
                         Serial3.begin(115200); // if efis data is not present but display is turn on serial3 (rs232 levels)
                         }
+
+  if (serialOutFormat=="ALTENCODER" && serialOutPort=="Serial3")
+                        {
+                          Serial.println("Initialize Serial3");
+                        Serial3.begin(9600);
+                        }                      
     
   digitalWrite(PIN_LED1, 1);
   
@@ -901,7 +963,6 @@ loopcount++;
 readWifiSerial();
 #endif
 
-
 #ifdef SDCARD
 // look for serial command
 if (Serial.available()>0)
@@ -920,6 +981,7 @@ if (Serial.available()>0)
 // CONFIG!
 // AUDIOTEST!
 serialCmdChar = Serial.read();    
+
   if (serialCmdChar!=char(0x21) && serialCmdBufferSize<50)
     {    
     serialCmdBuffer[serialCmdBufferSize]=serialCmdChar;
@@ -1179,7 +1241,7 @@ if (millis()-looptime > 1000)
              lastReceivedEfisTime=millis();// reset timer 
             
              #ifdef EFISDATADEBUG
-            Serial.println("\n Efis data timeout. Restarting serial port 3");
+             Serial.println("\n Efis data timeout. Restarting serial port 3");
              Serial.printf("\nEfis last transmit: %i", millis()-lastReceivedEfisTime);
              #endif
              }
@@ -1301,7 +1363,6 @@ if ( overgWarning && millis()-gLimitLastUpdate>=100)
               }
       vnoChimeLastUpdate=millis();        
       }
-      
 
 // write serialout data
 if (serialOutPort!="NONE" && millis()-serialoutLastUpdate>200) // update every 200ms
@@ -1383,13 +1444,34 @@ if (serialOutPort!="NONE" && millis()-serialoutLastUpdate>200) // update every 2
                                       Serial1.print(serialCRC,HEX);
                                       Serial1.println();
                                       }
+                  serialoutLastUpdate=millis();
                   
               } else
                     if (serialOutFormat == "ONSPEED")
                         {
                         // send ONSPEED formatted data
                         }
-    }
+                        
+              } else
+                    if (serialOutFormat == "ALTENCODER")
+                        {                    
+                          Serial.println("In ALTENCODER function");      
+                        // send Altitude Encoder formatted data
+                        char altEncoderString[9];
+                        float smoothingAlpha=2.0/(serialDisplaySmoothing+1);
+
+                        noInterrupts();
+                        if (PaltSmoothed==0) PaltSmoothed=Palt; else PaltSmoothed=Palt * smoothingAlpha/10+ (1-smoothingAlpha/10)*PaltSmoothed; // increased smoothing needed
+                        interrupts();
+                        sprintf(altEncoderString,"ALT %05i", int(PaltSmoothed));
+                        Serial.print(altEncoderString);
+                        
+                        if (serialOutPort=="Serial3")
+                            {                   
+                            Serial3.print(altEncoderString);
+                            }
+                        serialoutLastUpdate=millis();
+                        }
     
 
 if (sendDisplayData && millis()-displayDataLastUpdate>100) // update every 100ms (10Hz)
@@ -1418,11 +1500,11 @@ if (readEfisData)
     {
     //read EFIS data
     int efisCharCount=0;
-     while (Serial3.available()>0 && efisCharCount<1024)
+     while (serialIn->available()>0 && efisCharCount<1024)
           {
           efisCharCount++;
-          efisMaxAvailable=max(Serial3.available(),efisMaxAvailable);          
-          efis_inChar=Serial3.read();
+          efisMaxAvailable=max(serialIn->available(),efisMaxAvailable);          
+          efis_inChar=serialIn->read();
           lastReceivedEfisTime=millis(); 
           charsreceived++;      
           if  (efisBufferString.length()>=230) efisBufferString=""; // prevent buffer overflow;     
@@ -1432,289 +1514,7 @@ if (readEfisData)
               if (efis_inChar == char(0x0A))
                           {
                           // end of line
-    if (efisType=="ADVANCED")
-        {        
-                          if (efisBufferString.length()==74 && efisBufferString[0]=='!' && efisBufferString[1]=='1')
-                             {
-                             // parse Skyview AHRS data                            
-                             String parseString;
-                             //calculate CRC
-                             int calcCRC=0;
-                             for (int i=0;i<=69;i++) calcCRC+=efisBufferString[i];                     
-                             calcCRC=calcCRC & 0xFF;
-                             if (calcCRC==(int)strtol(&efisBufferString.substring(70, 72)[0],NULL,16)) // convert from hex back into integer for camparison, issue with missing leading zeros when comparing hex formats
-                                {
-                                 //float efisIAS                            
-                                 parseString=efisBufferString.substring(23, 27); 
-                                 if (parseString!="XXXX") efisIAS=parseString.toFloat()/10; else efisIAS=-1; // knots
-                                 //float efisPitch                             
-                                 parseString=efisBufferString.substring(11, 15);
-                                 if (parseString!="XXXX") efisPitch=parseString.toFloat()/10; else efisPitch=-100; // degrees
-                                 // float efisRoll
-                                 parseString=efisBufferString.substring(15, 20);
-                                 if (parseString!="XXXXX") efisRoll=parseString.toFloat()/10; else efisRoll=-100; // degrees
-                                // float MagneticHeading                                   
-                                 parseString=efisBufferString.substring(20, 23);
-                                 if (parseString!="XXX") efisHeading=parseString.toInt(); else efisHeading=-1;                             
-                                 // float efisLateralG
-                                 parseString=efisBufferString.substring(37, 40);
-                                 if (parseString!="XXX") efisLateralG=parseString.toFloat()/100; else efisLateralG=-100;
-                                 // float efisVerticalG                                   
-                                 parseString=efisBufferString.substring(40, 43);
-                                 if (parseString!="XXX") efisVerticalG=parseString.toFloat()/10; else efisVerticalG=-100;
-                                 // int efisPercentLift                 
-                                 parseString=efisBufferString.substring(43, 45);
-                                 if (parseString!="XX") efisPercentLift=parseString.toInt(); else efisPercentLift=-1; // 00 to 99, percentage of stall angle.
-                                 // int efisPalt
-                                 parseString=efisBufferString.substring(27, 33); 
-                                 if (parseString!="XXXXXX") efisPalt=parseString.toInt(); else efisPalt=-10000; // feet
-                                 // int efisVSI                 
-                                 parseString=efisBufferString.substring(45, 49); 
-                                 if (parseString!="XXXX") efisVSI=parseString.toInt()*10; else efisVSI=-10000; // feet/min 
-                                 //float efisTAS;
-                                 parseString=efisBufferString.substring(52, 56);
-                                 if (parseString!="XXXX") efisTAS=parseString.toFloat()/10; else efisTAS=-1; // kts             
-                                 //float efisOAT;
-                                 parseString=efisBufferString.substring(49, 52);
-                                 if (parseString!="XXX") efisOAT=parseString.toFloat(); else efisTAS=-100; // Celsius
-                                 // String efisTime
-                                 efisTime=efisBufferString.substring(3, 5)+":"+efisBufferString.substring(5, 7)+":"+efisBufferString.substring(7, 9)+"."+efisBufferString.substring(9, 11);                             
-                                 efisTimestamp=millis();
-                                 #ifdef EFISDATADEBUG
-                                 Serial.printf("SKYVIEW ADAHRS: efisIAS %.2f, efisPitch %.2f, efisRoll %.2f, efisLateralG %.2f, efisVerticalG %.2f, efisPercentLift %i, efisPalt %i, efisVSI %i, efisTAS %.2f, efisOAT %.2f, efisHeading %i ,efisTime %s\n", efisIAS, efisPitch, efisRoll, efisLateralG, efisVerticalG, efisPercentLift,efisPalt,efisVSI,efisTAS,efisOAT,efisHeading, efisTime.c_str());                        
-                                 #endif
-                                 #ifdef SDCARDDEBUG
-                                 Serial.print(".");
-                                 #endif
-                                                                                
-                                } 
-                                #ifdef EFISDATADEBUG
-                                else Serial.println("SKYVIEW ADAHRS CRC Failed");
-                                #endif
-                                
-                             } else
-                             
-                             if (efisBufferString.length()==225 && efisBufferString[0]=='!' && efisBufferString[1]=='3')
-                                     {
-                                     // parse Skyview EMS data
-                                     String parseString;
-                                     //calculate CRC
-                                     int calcCRC=0;
-                                     for (int i=0;i<=220;i++) calcCRC+=efisBufferString[i];
-                                     calcCRC=calcCRC & 0xFF;
-                                     if (calcCRC==(int)strtol(&efisBufferString.substring(221, 223)[0],NULL,16)) // convert from hex back into integer for camparison, issue with missing leading zeros when comparing hex formats
-                                        {
-                                       
-                                        //float efisFuelRemaining=0.00;
-                                         parseString=efisBufferString.substring(44, 47);
-                                         if (parseString!="XXX") efisFuelRemaining=parseString.toFloat()/10; else efisFuelRemaining=-1; // gallons
-                                         //float efisFuelFlow=0.00;
-                                         parseString=efisBufferString.substring(29, 32);
-                                         if (parseString!="XXX") efisFuelFlow=parseString.toFloat()/10; else efisFuelFlow=-1; // gph
-                                         //float efisMAP=0.00;
-                                         parseString=efisBufferString.substring(26, 29);
-                                         if (parseString!="XXX") efisMAP=parseString.toFloat()/10; else efisMAP=-1; //inHg
-                                         // int efisRPM=0;
-                                         parseString=efisBufferString.substring(18, 22);
-                                         if (parseString!="XXXX") efisRPM=parseString.toInt(); else efisRPM=-1;
-                                         // int efisPercentPower=0;                                     
-                                         parseString=efisBufferString.substring(217, 220);
-                                         if (parseString!="XXX") efisPercentPower=parseString.toInt(); else efisPercentPower=-1;                                                            
-                                         #ifdef EFISDATADEBUG
-                                         Serial.printf("SKYVIEW EMS: efisFuelRemaining %.2f, efisFuelFlow %.2f, efisMAP %.2f, efisRPM %i, efisPercentPower %i\n", efisFuelRemaining, efisFuelFlow, efisMAP, efisRPM, efisPercentPower);                                     
-                                         #endif
-                                         #ifdef SDCARDDEBUG
-                                        Serial.print(".");
-                                        #endif
-                                                             
-                                        } 
-                                        #ifdef EFISDATADEBUG
-                                        else Serial.println("SKYVIEW EMS CRC Failed");
-                                        #endif
-                                        
-                                     
-                                     }
-        } // end efisType ADVANCED
-        else
-          if (efisType=="DYNOND10") 
-             {             
-                                    if (efisBufferString.length()==DYNON_SERIAL_LEN)
-                                        {
-                                        // parse Dynon data
-                                         String parseString;
-                                         //calculate CRC
-                                         int calcCRC=0;
-                                         for (int i=0;i<=48;i++) calcCRC+=efisBufferString[i];                     
-                                         calcCRC=calcCRC & 0xFF;
-                                         if (calcCRC==(int)strtol(&efisBufferString.substring(49, 51)[0],NULL,16)) // convert from hex back into integer for camparison, issue with missing leading zeros when comparing hex formats
-                                            {
-                                            // CRC passed
-                                             parseString=efisBufferString.substring(20, 24);                                                                                                      
-                                             efisIAS=parseString.toFloat()/10*1.94384; // m/s to knots
-                                             parseString=efisBufferString.substring(8, 12);
-                                             efisPitch=parseString.toFloat()/10;
-                                             parseString=efisBufferString.substring(12, 17);
-                                             efisRoll=parseString.toFloat()/10;
-                                             parseString=efisBufferString.substring(33, 36);
-                                             efisLateralG=parseString.toFloat()/100;
-                                             parseString=efisBufferString.substring(36, 39);
-                                             efisVerticalG=parseString.toFloat()/10;
-                                             parseString=efisBufferString.substring(39, 41);
-                                             efisPercentLift=parseString.toInt(); // 00 to 99, percentage of stall angle
-                                             parseString=efisBufferString.substring(45,47);
-                                             long statusBitInt = strtol(&parseString[1], NULL, 16);                                                                                 
-                                             if (bitRead(statusBitInt, 0))
-                                                  {
-                                                  // when bitmask bit 0 is 1, grab pressure altitude and VSI, otherwise use previous value (skip turn rate and density altitude)
-                                                  parseString=efisBufferString.substring(24, 29);
-                                                  efisPalt=parseString.toInt()*3.28084; // meters to feet
-                                                  parseString=efisBufferString.substring(29, 33);
-                                                  efisVSI= int(parseString.toFloat()/10*60); // feet/sec to feet/min
-                                                  }                                                               
-                                             efisTimestamp=millis();
-                                             efisTime=efisBufferString.substring(0, 2)+":"+efisBufferString.substring(2, 4)+":"+efisBufferString.substring(4, 6)+"."+efisBufferString.substring(6, 8);                                        
-                                             #ifdef EFISDATADEBUG                     
-                                             Serial.printf("D10: efisIAS %.2f, efisPitch %.2f, efisRoll %.2f, efisLateralG %.2f, efisVerticalG %.2f, efisPercentLift %i, efisPalt %i, efisVSI %i, efisTime %s\n", efisIAS, efisPitch, efisRoll, efisLateralG, efisVerticalG, efisPercentLift,efisPalt,efisVSI,efisTime.c_str());                                                                 
-                                             #endif
-                                             #ifdef SDCARDDEBUG
-                                             Serial.print(".");
-                                             #endif                                         
-                                            }
-                                            #ifdef EFISDATADEBUG
-                                            else Serial.println("D10 CRC Failed");
-                                            #endif
-                                 
-                                          }
-             } // end efisType DYNOND10
-             else
-                if (efisType=="GARMING5")
-                    {
-                                            
-                                          
-                                          if (efisBufferString.length()==59 && efisBufferString[0]=='=' && efisBufferString[1]=='1' && efisBufferString[2]=='1')
-                                                     {
-                                                     // parse G5 data
-                                                     String parseString;
-                                                     //calculate CRC
-                                                     int calcCRC=0;                           
-                                                     for (int i=0;i<=54;i++) calcCRC+=efisBufferString[i];                     
-                                                     calcCRC=calcCRC & 0xFF;
-                                                     if (calcCRC==(int)strtol(&efisBufferString.substring(55, 57)[0],NULL,16)) // convert from hex back into integer for camparison, issue with missing leading zeros when comparing hex formats
-                                                        {
-                                                          // CRC passed                                                                                                          
-                                                         parseString=efisBufferString.substring(23, 27);
-                                                         if (parseString!="____") efisIAS=parseString.toFloat()/10;
-                                                         parseString=efisBufferString.substring(11, 15);
-                                                         if (parseString!="____") efisPitch=parseString.toFloat()/10;
-                                                         parseString=efisBufferString.substring(15, 20);
-                                                         if (parseString!="_____") efisRoll=parseString.toFloat()/10;                                                    
-                                                         parseString=efisBufferString.substring(20, 23);
-                                                         if (parseString!="___") efisHeading=parseString.toInt();
-                                                         parseString=efisBufferString.substring(37, 40);
-                                                         if (parseString!="___") efisLateralG=parseString.toFloat()/100;                            
-                                                         parseString=efisBufferString.substring(40, 43);
-                                                         if (parseString!="___") efisVerticalG=parseString.toFloat()/10;
-                                                         parseString=efisBufferString.substring(27, 33);
-                                                         if (parseString!="______") efisPalt=parseString.toInt(); // feet
-                                                         parseString=efisBufferString.substring(45, 49);
-                                                         if (parseString!="____") efisVSI=parseString.toInt()*10; //10 fpm
-                                                         efisTimestamp=millis();
-                                                         efisTime=efisBufferString.substring(3, 5)+":"+efisBufferString.substring(5, 7)+":"+efisBufferString.substring(7, 9)+"."+efisBufferString.substring(9, 11);   
-                                                         #ifdef EFISDATADEBUG
-                                                         Serial.printf("G5 data: efisIAS %.2f, efisPitch %.2f, efisRoll %.2f, efisHeading %i, efisLateralG %.2f, efisVerticalG %.2f, efisPalt %i, efisVSI %i,efisTime %s", efisIAS, efisPitch, efisRoll, efisHeading, efisLateralG, efisVerticalG,efisPalt,efisVSI,efisTime.c_str());                        
-                                                         Serial.println();
-                                                         #endif
-                                                         #ifdef SDCARDDEBUG
-                                                         Serial.print(".");
-                                                         #endif                                                      
-                                                         }
-                                                         #ifdef EFISDATADEBUG
-                                                         else Serial.println("G5 CRC Failed");
-                                                         #endif                                                                             
-                                                      }
-                    } // efisType GARMING5
-                    else
-                     if (efisType=="GARMING3X")
-                     {
-                                                    
-                                          // parse G3X attitude data, 10hz
-                                          if (efisBufferString.length()==59 && efisBufferString[0]=='=' && efisBufferString[1]=='1' && efisBufferString[2]=='1')
-                                                     {
-                                                     // parse G3X data
-                                                     String parseString;
-                                                     //calculate CRC
-                                                     int calcCRC=0;                           
-                                                     for (int i=0;i<=54;i++) calcCRC+=efisBufferString[i];                     
-                                                     calcCRC=calcCRC & 0xFF;
-                                                     if (calcCRC==(int)strtol(&efisBufferString.substring(55, 57)[0],NULL,16)) // convert from hex back into integer for camparison, issue with missing leading zeros when comparing hex formats
-                                                        {
-                                                        // CRC passed                                                                                                          
-                                                         parseString=efisBufferString.substring(23, 27);
-                                                         if (parseString!="____") efisIAS=parseString.toFloat()/10;
-                                                         parseString=efisBufferString.substring(11, 15);
-                                                         if (parseString!="____") efisPitch=parseString.toFloat()/10;
-                                                         parseString=efisBufferString.substring(15, 20);
-                                                         if (parseString!="_____") efisRoll=parseString.toFloat()/10;                                                    
-                                                         parseString=efisBufferString.substring(20, 23);
-                                                         if (parseString!="___") efisHeading=parseString.toInt();
-                                                         parseString=efisBufferString.substring(37, 40);
-                                                         if (parseString!="___") efisLateralG=parseString.toFloat()/100;
-                                                         parseString=efisBufferString.substring(40, 43);
-                                                         if (parseString!="___") efisVerticalG=parseString.toFloat()/10;
-                                                         parseString=efisBufferString.substring(43, 45);
-                                                         if (parseString!="__") efisPercentLift=parseString.toInt();
-                                                         parseString=efisBufferString.substring(27, 33);
-                                                         if (parseString!="______") efisPalt=parseString.toInt(); // feet
-                                                         parseString=efisBufferString.substring(49, 52);
-                                                         if (parseString!="___") efisOAT=parseString.toInt(); 
-                                                         parseString=efisBufferString.substring(45, 49); // celsius
-                                                         if (parseString!="____") efisVSI=parseString.toInt()*10; //10 fpm                                                     
-                                                         efisTimestamp=millis();                                                       
-                                                         efisTime=efisBufferString.substring(3, 5)+":"+efisBufferString.substring(5, 7)+":"+efisBufferString.substring(7, 9)+"."+efisBufferString.substring(9, 11);                                        
-                                                         #ifdef EFISDATADEBUG
-                                                         Serial.printf("G3X Attitude data: efisIAS %.2f, efisPitch %.2f, efisRoll %.2f, efisHeading %i, efisLateralG %.2f, efisVerticalG %.2f, efisPercentLift %i, efisPalt %i, efisVSI %i,efisTime %s", efisIAS, efisPitch, efisRoll, efisHeading, efisLateralG, efisVerticalG, efisPercentLift,efisPalt,efisVSI,efisTime.c_str());                        
-                                                         Serial.println();
-                                                         #endif
-                                                         #ifdef SDCARDDEBUG
-                                                         Serial.print(".");
-                                                         #endif                                                      
-                                                         }
-                                                         #ifdef EFISDATADEBUG
-                                                         else Serial.println("G3X Attitude CRC Failed");
-                                                         #endif                                                                             
-                                                      }
-                                               // parse G3X engine data, 5Hz
-                                          if (efisBufferString.length()==221 && efisBufferString[0]=='=' && efisBufferString[1]=='3' && efisBufferString[2]=='1') 
-                                          {                                                                                          
-                                                     String parseString;
-                                                     //calculate CRC
-                                                     int calcCRC=0;                           
-                                                     for (int i=0;i<=216;i++) calcCRC+=efisBufferString[i];
-                                                     calcCRC=calcCRC & 0xFF;
-                                                     if (calcCRC==(int)strtol(&efisBufferString.substring(217, 219)[0],NULL,16)) // convert from hex back into integer for camparison, issue with missing leading zeros when comparing hex formats
-                                                        { 
-                                                        //float efisFuelRemaining=0.00;
-                                                        parseString=efisBufferString.substring(44, 47);
-                                                        if (parseString!="___") efisFuelRemaining=parseString.toFloat()/10;
-                                                        parseString=efisBufferString.substring(29, 32);
-                                                        if (parseString!="___") efisFuelFlow=parseString.toFloat()/10;                                                    
-                                                        parseString=efisBufferString.substring(26, 29);
-                                                        if (parseString!="___") efisMAP=parseString.toFloat()/10;
-                                                        parseString=efisBufferString.substring(18, 22);
-                                                        if (parseString!="____") efisRPM=parseString.toInt();                                                    
-                                                        #ifdef EFISDATADEBUG
-                                                        Serial.printf("G3X EMS: efisFuelRemaining %.2f, efisFuelFlow %.2f, efisMAP %.2f, efisRPM %i\n", efisFuelRemaining, efisFuelFlow, efisMAP, efisRPM);                                     
-                                                        #endif
-                                                        #ifdef SDCARDDEBUG
-                                                        Serial.print(".");
-                                                        #endif
-                                                        }
-                                                         #ifdef EFISDATADEBUG
-                                                         else Serial.println("G3X EMS CRC Failed");
-                                                         #endif                                     
-                                          }
-                                                      
-        } // end efisType GARMING3X
+                          processEfisSerial();
                                                      
                           efisBufferString="";  // reset buffer                                               
                           }
@@ -1800,6 +1600,337 @@ if (readBoom)
  } // if BOOM
 
 readingSerial=false;
+}
+
+void processEfisSerial()
+{
+if (efisType=="ADVANCED")
+        {        
+        if (efisBufferString.length()==74 && efisBufferString[0]=='!' && efisBufferString[1]=='1')
+           {
+           // parse Skyview AHRS data                            
+           String parseString;
+           //calculate CRC
+           int calcCRC=0;
+           for (int i=0;i<=69;i++) calcCRC+=efisBufferString[i];                     
+           calcCRC=calcCRC & 0xFF;
+           if (calcCRC==(int)strtol(&efisBufferString.substring(70, 72)[0],NULL,16)) // convert from hex back into integer for camparison, issue with missing leading zeros when comparing hex formats
+              {
+               //float efisIAS                            
+               parseString=efisBufferString.substring(23, 27); 
+               if (parseString!="XXXX") efisIAS=parseString.toFloat()/10; else efisIAS=-1; // knots
+               //float efisPitch                             
+               parseString=efisBufferString.substring(11, 15);
+               if (parseString!="XXXX") efisPitch=parseString.toFloat()/10; else efisPitch=-100; // degrees
+               // float efisRoll
+               parseString=efisBufferString.substring(15, 20);
+               if (parseString!="XXXXX") efisRoll=parseString.toFloat()/10; else efisRoll=-100; // degrees
+              // float MagneticHeading                                   
+               parseString=efisBufferString.substring(20, 23);
+               if (parseString!="XXX") efisHeading=parseString.toInt(); else efisHeading=-1;                             
+               // float efisLateralG
+               parseString=efisBufferString.substring(37, 40);
+               if (parseString!="XXX") efisLateralG=parseString.toFloat()/100; else efisLateralG=-100;
+               // float efisVerticalG                                   
+               parseString=efisBufferString.substring(40, 43);
+               if (parseString!="XXX") efisVerticalG=parseString.toFloat()/10; else efisVerticalG=-100;
+               // int efisPercentLift                 
+               parseString=efisBufferString.substring(43, 45);
+               if (parseString!="XX") efisPercentLift=parseString.toInt(); else efisPercentLift=-1; // 00 to 99, percentage of stall angle.
+               // int efisPalt
+               parseString=efisBufferString.substring(27, 33); 
+               if (parseString!="XXXXXX") efisPalt=parseString.toInt(); else efisPalt=-10000; // feet
+               // int efisVSI                 
+               parseString=efisBufferString.substring(45, 49); 
+               if (parseString!="XXXX") efisVSI=parseString.toInt()*10; else efisVSI=-10000; // feet/min 
+               //float efisTAS;
+               parseString=efisBufferString.substring(52, 56);
+               if (parseString!="XXXX") efisTAS=parseString.toFloat()/10; else efisTAS=-1; // kts             
+               //float efisOAT;
+               parseString=efisBufferString.substring(49, 52);
+               if (parseString!="XXX") efisOAT=parseString.toFloat(); else efisTAS=-100; // Celsius
+               // String efisTime
+               efisTime=efisBufferString.substring(3, 5)+":"+efisBufferString.substring(5, 7)+":"+efisBufferString.substring(7, 9)+"."+efisBufferString.substring(9, 11);                             
+               efisTimestamp=millis();
+               #ifdef EFISDATADEBUG
+               Serial.printf("SKYVIEW ADAHRS: efisIAS %.2f, efisPitch %.2f, efisRoll %.2f, efisLateralG %.2f, efisVerticalG %.2f, efisPercentLift %i, efisPalt %i, efisVSI %i, efisTAS %.2f, efisOAT %.2f, efisHeading %i ,efisTime %s\n", efisIAS, efisPitch, efisRoll, efisLateralG, efisVerticalG, efisPercentLift,efisPalt,efisVSI,efisTAS,efisOAT,efisHeading, efisTime.c_str());                        
+               #endif
+               #ifdef SDCARDDEBUG
+               Serial.print(".");
+               #endif
+                                                              
+              } 
+              #ifdef EFISDATADEBUG
+              else Serial.println("SKYVIEW ADAHRS CRC Failed");
+              #endif
+              
+           } else
+           
+           if (efisBufferString.length()==225 && efisBufferString[0]=='!' && efisBufferString[1]=='3')
+                   {
+                   // parse Skyview EMS data
+                   String parseString;
+                   //calculate CRC
+                   int calcCRC=0;
+                   for (int i=0;i<=220;i++) calcCRC+=efisBufferString[i];
+                   calcCRC=calcCRC & 0xFF;
+                   if (calcCRC==(int)strtol(&efisBufferString.substring(221, 223)[0],NULL,16)) // convert from hex back into integer for camparison, issue with missing leading zeros when comparing hex formats
+                      {
+                     
+                      //float efisFuelRemaining=0.00;
+                       parseString=efisBufferString.substring(44, 47);
+                       if (parseString!="XXX") efisFuelRemaining=parseString.toFloat()/10; else efisFuelRemaining=-1; // gallons
+                       //float efisFuelFlow=0.00;
+                       parseString=efisBufferString.substring(29, 32);
+                       if (parseString!="XXX") efisFuelFlow=parseString.toFloat()/10; else efisFuelFlow=-1; // gph
+                       //float efisMAP=0.00;
+                       parseString=efisBufferString.substring(26, 29);
+                       if (parseString!="XXX") efisMAP=parseString.toFloat()/10; else efisMAP=-1; //inHg
+                       // int efisRPM=0;
+                       parseString=efisBufferString.substring(18, 22);
+                       if (parseString!="XXXX") efisRPM=parseString.toInt(); else efisRPM=-1;
+                       // int efisPercentPower=0;                                     
+                       parseString=efisBufferString.substring(217, 220);
+                       if (parseString!="XXX") efisPercentPower=parseString.toInt(); else efisPercentPower=-1;                                                            
+                       #ifdef EFISDATADEBUG
+                       Serial.printf("SKYVIEW EMS: efisFuelRemaining %.2f, efisFuelFlow %.2f, efisMAP %.2f, efisRPM %i, efisPercentPower %i\n", efisFuelRemaining, efisFuelFlow, efisMAP, efisRPM, efisPercentPower);                                     
+                       #endif
+                       #ifdef SDCARDDEBUG
+                      Serial.print(".");
+                      #endif
+                                           
+                      } 
+                      #ifdef EFISDATADEBUG
+                      else Serial.println("SKYVIEW EMS CRC Failed");
+                      #endif
+                      
+                   
+                   }
+} // end efisType ADVANCED
+else
+if (efisType=="DYNOND10") 
+{             
+                  if (efisBufferString.length()==DYNON_SERIAL_LEN)
+                      {
+                      // parse Dynon data
+                       String parseString;
+                       //calculate CRC
+                       int calcCRC=0;
+                       for (int i=0;i<=48;i++) calcCRC+=efisBufferString[i];                     
+                       calcCRC=calcCRC & 0xFF;
+                       if (calcCRC==(int)strtol(&efisBufferString.substring(49, 51)[0],NULL,16)) // convert from hex back into integer for camparison, issue with missing leading zeros when comparing hex formats
+                          {
+                          // CRC passed
+                           parseString=efisBufferString.substring(20, 24);                                                                                                      
+                           efisIAS=parseString.toFloat()/10*1.94384; // m/s to knots
+                           parseString=efisBufferString.substring(8, 12);
+                           efisPitch=parseString.toFloat()/10;
+                           parseString=efisBufferString.substring(12, 17);
+                           efisRoll=parseString.toFloat()/10;
+                           parseString=efisBufferString.substring(33, 36);
+                           efisLateralG=parseString.toFloat()/100;
+                           parseString=efisBufferString.substring(36, 39);
+                           efisVerticalG=parseString.toFloat()/10;
+                           parseString=efisBufferString.substring(39, 41);
+                           efisPercentLift=parseString.toInt(); // 00 to 99, percentage of stall angle
+                           parseString=efisBufferString.substring(45,47);
+                           long statusBitInt = strtol(&parseString[1], NULL, 16);                                                                                 
+                           if (bitRead(statusBitInt, 0))
+                                {
+                                // when bitmask bit 0 is 1, grab pressure altitude and VSI, otherwise use previous value (skip turn rate and density altitude)
+                                parseString=efisBufferString.substring(24, 29);
+                                efisPalt=parseString.toInt()*3.28084; // meters to feet
+                                parseString=efisBufferString.substring(29, 33);
+                                efisVSI= int(parseString.toFloat()/10*60); // feet/sec to feet/min
+                                }                                                               
+                           efisTimestamp=millis();
+                           efisTime=efisBufferString.substring(0, 2)+":"+efisBufferString.substring(2, 4)+":"+efisBufferString.substring(4, 6)+"."+efisBufferString.substring(6, 8);                                        
+                           #ifdef EFISDATADEBUG                     
+                           Serial.printf("D10: efisIAS %.2f, efisPitch %.2f, efisRoll %.2f, efisLateralG %.2f, efisVerticalG %.2f, efisPercentLift %i, efisPalt %i, efisVSI %i, efisTime %s\n", efisIAS, efisPitch, efisRoll, efisLateralG, efisVerticalG, efisPercentLift,efisPalt,efisVSI,efisTime.c_str());                                                                 
+                           #endif
+                           #ifdef SDCARDDEBUG
+                           Serial.print(".");
+                           #endif                                         
+                          }
+                          #ifdef EFISDATADEBUG
+                          else Serial.println("D10 CRC Failed");
+                          #endif
+               
+                        }
+} // end efisType DYNOND10
+else
+if (efisType=="GARMING5")
+  {
+                          
+                        
+                        if (efisBufferString.length()==59 && efisBufferString[0]=='=' && efisBufferString[1]=='1' && efisBufferString[2]=='1')
+                                   {
+                                   // parse G5 data
+                                   String parseString;
+                                   //calculate CRC
+                                   int calcCRC=0;                           
+                                   for (int i=0;i<=54;i++) calcCRC+=efisBufferString[i];                     
+                                   calcCRC=calcCRC & 0xFF;
+                                   if (calcCRC==(int)strtol(&efisBufferString.substring(55, 57)[0],NULL,16)) // convert from hex back into integer for camparison, issue with missing leading zeros when comparing hex formats
+                                      {
+                                        // CRC passed                                                                                                          
+                                       parseString=efisBufferString.substring(23, 27);
+                                       if (parseString!="____") efisIAS=parseString.toFloat()/10;
+                                       parseString=efisBufferString.substring(11, 15);
+                                       if (parseString!="____") efisPitch=parseString.toFloat()/10;
+                                       parseString=efisBufferString.substring(15, 20);
+                                       if (parseString!="_____") efisRoll=parseString.toFloat()/10;                                                    
+                                       parseString=efisBufferString.substring(20, 23);
+                                       if (parseString!="___") efisHeading=parseString.toInt();
+                                       parseString=efisBufferString.substring(37, 40);
+                                       if (parseString!="___") efisLateralG=parseString.toFloat()/100;                            
+                                       parseString=efisBufferString.substring(40, 43);
+                                       if (parseString!="___") efisVerticalG=parseString.toFloat()/10;
+                                       parseString=efisBufferString.substring(27, 33);
+                                       if (parseString!="______") efisPalt=parseString.toInt(); // feet
+                                       parseString=efisBufferString.substring(45, 49);
+                                       if (parseString!="____") efisVSI=parseString.toInt()*10; //10 fpm
+                                       parseString=efisBufferString.substring(52, 55);
+                                       if (parseString!="___") efisAltSetting=27.50+parseString.toFloat()/100; // in Hg
+                                       efisTimestamp=millis();
+                                       efisTime=efisBufferString.substring(3, 5)+":"+efisBufferString.substring(5, 7)+":"+efisBufferString.substring(7, 9)+"."+efisBufferString.substring(9, 11);   
+                                       #ifdef EFISDATADEBUG
+                                       Serial.printf("G5 data: efisIAS %.2f, efisPitch %.2f, efisRoll %.2f, efisHeading %i, efisLateralG %.2f, efisVerticalG %.2f, efisPalt %i, efisVSI %i, efisAltSetting %.2f,efisTime %s", efisIAS, efisPitch, efisRoll, efisHeading, efisLateralG, efisVerticalG,efisPalt,efisVSI,efisAltSetting,efisTime.c_str());                        
+                                       Serial.println();
+                                       #endif
+                                       #ifdef SDCARDDEBUG
+                                       Serial.print(".");
+                                       #endif                                                      
+                                       }
+                                       #ifdef EFISDATADEBUG
+                                       else Serial.println("G5 CRC Failed");
+                                       #endif                                                                             
+                                    }
+
+                        // parse GPS data from G5
+                        if (efisBufferString.length()==57 && efisBufferString[0]=='@')
+                                   {
+                                   // parse G5 GPS data
+                                   String parseString;                                                                                                         
+                                   parseString=efisBufferString.substring(14, 16);
+                                   if (parseString!="__") gpsLat=parseString.toFloat(); // degrees
+                                   parseString=efisBufferString.substring(16, 21);
+                                   if (parseString!="_____") gpsLat=gpsLat+(parseString.toFloat()/1000); // deg.minutes
+                                   parseString=efisBufferString.substring(22, 25);
+                                   if (parseString!="___") gpsLong=parseString.toFloat(); // degress
+                                   parseString=efisBufferString.substring(25, 30);
+                                   if (parseString!="_____") gpsLong=gpsLong+(parseString.toFloat()/1000); // deg.minutes
+                                   parseString=efisBufferString.substring(30, 31);
+                                   if (parseString!="_") gpsPosStatus=parseString; // g = 2D; G = 3D; d = 2D diff; D = 3D diff; S = simulated       
+                                   parseString=efisBufferString.substring(37, 40);
+                                   if (parseString!="______") gpsAlt=parseString.toInt(); // m                           
+                                   parseString=efisBufferString.substring(41, 45);
+                                   if (parseString!="___") gpsVelocityEW=parseString.toFloat(); // m/s
+                                   parseString=efisBufferString.substring(46, 50);
+                                   if (parseString!="______") gpsVelocityNS=parseString.toFloat(); // m/s
+                                   parseString=efisBufferString.substring(51, 55);
+                                   if (parseString!="____") gpsVerticalVelocity=parseString.toFloat(); // m/s
+                                   efisTimestamp=millis();
+                                   
+                                   if (efisBufferString.substring(40, 41) == 'W') gpsVelocityEW = gpsVelocityEW * -1;
+                                   if (efisBufferString.substring(45, 46) == 'S') gpsVelocityNS = gpsVelocityNS * -1;
+                                   gpsVelocity = sqrt((gpsVelocityEW*gpsVelocityEW)+(gpsVelocityNS*gpsVelocityNS)); // velocity in m/s
+                                   gpsTrack = atan2(gpsVelocityEW, gpsVelocityNS)*57.2958; // track in degree
+                                   if (efisBufferString.substring(50, 51) == 'D') gpsVerticalVelocity = gpsVerticalVelocity * -1;
+
+                                   gpsDate=efisBufferString.substring(1, 3)+"/"+efisBufferString.substring(3,5)+"/"+efisBufferString.substring(5,7);
+                                   
+                                   #ifdef GPSDATADEBUG
+                                   Serial.printf("G5 GPS data: gpsLat %.4f, gpsLong %.4f, gpsPosStatus %s, gpsAlt %i, gpsVelocity %.2f, gpsTrack %.2f, gpsVerticalVelocity %.2f, gpsDate %s", gpsLat, gpsLong, gpsPosStatus, gpsAlt, gpsVelocity, gpsTrack,gpsVerticalVelocity,gpsDate.c_str());                        
+                                   Serial.println();
+                                   #endif
+                                   #ifdef SDCARDDEBUG
+                                   Serial.print(".");
+                                   #endif                                                      
+                                   }  
+  } // efisType GARMING5
+  else
+   if (efisType=="GARMING3X")
+   {
+                                  
+                        // parse G3X attitude data, 10hz
+                        if (efisBufferString.length()==59 && efisBufferString[0]=='=' && efisBufferString[1]=='1' && efisBufferString[2]=='1')
+                                   {
+                                   // parse G3X data
+                                   String parseString;
+                                   //calculate CRC
+                                   int calcCRC=0;                           
+                                   for (int i=0;i<=54;i++) calcCRC+=efisBufferString[i];                     
+                                   calcCRC=calcCRC & 0xFF;
+                                   if (calcCRC==(int)strtol(&efisBufferString.substring(55, 57)[0],NULL,16)) // convert from hex back into integer for camparison, issue with missing leading zeros when comparing hex formats
+                                      {
+                                      // CRC passed                                                                                                          
+                                       parseString=efisBufferString.substring(23, 27);
+                                       if (parseString!="____") efisIAS=parseString.toFloat()/10;
+                                       parseString=efisBufferString.substring(11, 15);
+                                       if (parseString!="____") efisPitch=parseString.toFloat()/10;
+                                       parseString=efisBufferString.substring(15, 20);
+                                       if (parseString!="_____") efisRoll=parseString.toFloat()/10;                                                    
+                                       parseString=efisBufferString.substring(20, 23);
+                                       if (parseString!="___") efisHeading=parseString.toInt();
+                                       parseString=efisBufferString.substring(37, 40);
+                                       if (parseString!="___") efisLateralG=parseString.toFloat()/100;
+                                       parseString=efisBufferString.substring(40, 43);
+                                       if (parseString!="___") efisVerticalG=parseString.toFloat()/10;
+                                       parseString=efisBufferString.substring(43, 45);
+                                       if (parseString!="__") efisPercentLift=parseString.toInt();
+                                       parseString=efisBufferString.substring(27, 33);
+                                       if (parseString!="______") efisPalt=parseString.toInt(); // feet
+                                       parseString=efisBufferString.substring(49, 52);
+                                       if (parseString!="___") efisOAT=parseString.toInt(); 
+                                       parseString=efisBufferString.substring(45, 49); // celsius
+                                       if (parseString!="____") efisVSI=parseString.toInt()*10; //10 fpm                                                     
+                                       efisTimestamp=millis();                                                       
+                                       efisTime=efisBufferString.substring(3, 5)+":"+efisBufferString.substring(5, 7)+":"+efisBufferString.substring(7, 9)+"."+efisBufferString.substring(9, 11);                                        
+                                       #ifdef EFISDATADEBUG
+                                       Serial.printf("G3X Attitude data: efisIAS %.2f, efisPitch %.2f, efisRoll %.2f, efisHeading %i, efisLateralG %.2f, efisVerticalG %.2f, efisPercentLift %i, efisPalt %i, efisVSI %i,efisTime %s", efisIAS, efisPitch, efisRoll, efisHeading, efisLateralG, efisVerticalG, efisPercentLift,efisPalt,efisVSI,efisTime.c_str());                        
+                                       Serial.println();
+                                       #endif
+                                       #ifdef SDCARDDEBUG
+                                       Serial.print(".");
+                                       #endif                                                      
+                                       }
+                                       #ifdef EFISDATADEBUG
+                                       else Serial.println("G3X Attitude CRC Failed");
+                                       #endif                                                                             
+                                    }
+                             // parse G3X engine data, 5Hz
+                        if (efisBufferString.length()==221 && efisBufferString[0]=='=' && efisBufferString[1]=='3' && efisBufferString[2]=='1') 
+                        {                                                                                          
+                                   String parseString;
+                                   //calculate CRC
+                                   int calcCRC=0;                           
+                                   for (int i=0;i<=216;i++) calcCRC+=efisBufferString[i];
+                                   calcCRC=calcCRC & 0xFF;
+                                   if (calcCRC==(int)strtol(&efisBufferString.substring(217, 219)[0],NULL,16)) // convert from hex back into integer for camparison, issue with missing leading zeros when comparing hex formats
+                                      { 
+                                      //float efisFuelRemaining=0.00;
+                                      parseString=efisBufferString.substring(44, 47);
+                                      if (parseString!="___") efisFuelRemaining=parseString.toFloat()/10;
+                                      parseString=efisBufferString.substring(29, 32);
+                                      if (parseString!="___") efisFuelFlow=parseString.toFloat()/10;                                                    
+                                      parseString=efisBufferString.substring(26, 29);
+                                      if (parseString!="___") efisMAP=parseString.toFloat()/10;
+                                      parseString=efisBufferString.substring(18, 22);
+                                      if (parseString!="____") efisRPM=parseString.toInt();                                                    
+                                      #ifdef EFISDATADEBUG
+                                      Serial.printf("G3X EMS: efisFuelRemaining %.2f, efisFuelFlow %.2f, efisMAP %.2f, efisRPM %i\n", efisFuelRemaining, efisFuelFlow, efisMAP, efisRPM);                                     
+                                      #endif
+                                      #ifdef SDCARDDEBUG
+                                      Serial.print(".");
+                                      #endif
+                                      }
+                                       #ifdef EFISDATADEBUG
+                                       else Serial.println("G3X EMS CRC Failed");
+                                       #endif                                     
+                        }
+                                    
+} // end efisType GARMING3X
 }
 
 void readWifiSerial()
@@ -2628,6 +2759,11 @@ if (PfwdPascal>0)
     }
     else IAS=0;
 
+// read OAT
+getOat();
+
+// calculate TAS
+calcTas(Pstatic);
 
 unsigned long timeStamp=millis(); // save timestamp for logging
 updateTones();
@@ -2662,8 +2798,16 @@ if (sdLogging)
           if (readEfisData)
             {
             int efisAge=millis()-efisTimestamp;                       
-            charsAdded+=sprintf(logLine+charsAdded, ",%.2f,%.2f,%.2f,%.2f,%.2f,%i,%i,%i,%.2f,%.2f,%.2f,%.2f,%.2f,%i,%i,%i,%i,%s",efisIAS,efisPitch,efisRoll,efisLateralG,efisVerticalG,efisPercentLift,efisPalt,efisVSI,efisTAS,efisOAT,efisFuelRemaining,efisFuelFlow,efisMAP,efisRPM,efisPercentPower,efisHeading,efisAge,efisTime.c_str());
-            }          
+            charsAdded+=sprintf(logLine+charsAdded, ",%.2f,%.2f,%.2f,%.2f,%.2f,%i,%i,%i,%.2f,%.2f,%.2f,%.2f,%.2f,%i,%i,%i,%.2f,%i,%s",efisIAS,efisPitch,efisRoll,efisLateralG,efisVerticalG,efisPercentLift,efisPalt,efisVSI,efisTAS,efisOAT,efisFuelRemaining,efisFuelFlow,efisMAP,efisRPM,efisPercentPower,efisHeading,efisAltSetting,efisAge,efisTime.c_str());
+            if (efisType=="GARMING5") 
+                {
+                  charsAdded+=sprintf(logLine+charsAdded, ",%s,%.4f,%.4f,%.1f,%.1f",gpsDate.c_str(),gpsLat,gpsLong,gpsTrack,gpsVelocity);
+                } 
+            }     
+          if (readOat)
+            {                     
+            charsAdded+=sprintf(logLine+charsAdded, ",%.2f,%.2f",analogOat,calculatedTas);
+            }      
           sprintf(logLine+charsAdded,"\n");
   //      Serial.print("8");        
         datalogRingBufferAdd(logLine);
@@ -3296,7 +3440,7 @@ void SendDisplayData()
  
  //flapsPercent=(float)flapsPos/(flapDegrees.Items[flapDegrees.Count-1]-flapDegrees.Items[0])*100; //flap angle / flap total travel *100 (needed for displaying partial flap donut on display)
  noInterrupts();
- sprintf(crc_buffer,"%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%i,%.6f,%i",displayAOA,smoothedPitch+pitchBias,smoothedRoll,IAS,displayPalt,verticalGload,aLat,alphaVA,LDmaxAOA,onSpeedAOAfast,onSpeedAOAslow,stallWarningAOA,flapsPos,coeffP,dataMark);
+ sprintf(crc_buffer,"%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%i,%.6f,%i",displayAOA,smoothedPitch+pitchBias,smoothedRoll,IAS,calculatedTas,analogOat,displayPalt,verticalGload,aLat,alphaVA,LDmaxAOA,onSpeedAOAfast,onSpeedAOAslow,stallWarningAOA,flapsPos,coeffP,dataMark);
  interrupts();
  for (unsigned int i=0;i<strlen(crc_buffer);i++) CRC=CRC+char(crc_buffer[i]); // claculate simple CRC
  sprintf(json_buffer,"$ONSPEED,%s,%i",crc_buffer,CRC);
@@ -3613,6 +3757,33 @@ if (readIMU && newAccelGyroAvailable())
     }// else Serial.println("no IMU data");
     
 #endif
+}
+
+void getOat()
+{
+  float reading;
+ 
+  reading = analogRead(OAT_PIN);
+ 
+  // convert the value to resistance
+  reading = (1023 / reading)  - 1;     // (1023/ADC - 1) 
+  reading = OAT_SERIES_RESISTOR / reading;  // 10K / (1023/ADC - 1)
+
+  reading = -20.14*log(reading)+211.7;
+  analogOat = 0.0031*(reading*reading)+0.9713*reading-2.3687; // Celsius
+
+  //analogOat = (analogOat*1.8) + 32;
+}
+
+void calcTas(float Pstatic)
+{
+  float rho;
+  float oatKelvin;
+
+  oatKelvin=analogOat + 273.15;
+
+  rho=(Pstatic*100)/(R_AIR+oatKelvin);
+  calculatedTas = IAS * sqrt(RHO_0/rho); // TAS in IAS units.
 }
 
 void enableWatchdog()

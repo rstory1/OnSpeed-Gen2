@@ -23,7 +23,7 @@
 #define BAUDRATE_WIFI 115200
 #define BAUDRATE_WIFI_HS 921600
 
-String wifi_fw="3.1"; // wifi firmware version
+String wifi_fw="3.1.1"; // wifi firmware version
 
 const char* ssid = "OnSpeed";
 const char* password = "angleofattack";
@@ -34,6 +34,8 @@ String clientwifi_password="test"; // currently not needed
 float AOA=0.0;
 float PercentLift=0.0;
 float IAS=0.0;
+float TAS=0.0;
+float OAT=0.0;
 float GLoad=0.00;
 float CRC;
 long liveDataAge=0; // millisec
@@ -81,6 +83,7 @@ typedef struct  {
 bool readBoom;
 bool readEfisData;
 String efisType;
+String efisPort;
 
 // serial output
 String serialOutFormat;
@@ -153,6 +156,10 @@ int acEmptyWeight;
 int acCrewWeight;
 float acFuelGallons;
 int acBestGlide;
+
+// oat sensor
+bool readOat;
+String oatSensorType;
 
 #include <Onspeed-settingsFunctions.h> // library with setting functions
 
@@ -377,6 +384,8 @@ void handleLive()
 " var GLoadLat=0;\n"
 " var PitchAngle=0;\n"
 " var RollAngle=0;\n"
+" var TAS=0;\n"
+" var OAT=0;\n"
 " var smoothingAlpha=.9;\n"
 " var liveConnecting=false;\n"
 "setInterval(updateAge,500); \n"
@@ -426,19 +435,21 @@ void handleLive()
 "   OnSpeed.Pitch= OnSpeedArray[2]; \n"
 "   OnSpeed.Roll= OnSpeedArray[3]; \n"
 "   OnSpeed.IAS= OnSpeedArray[4]; \n"
-"   OnSpeed.PAlt= OnSpeedArray[5]; \n"
-"   OnSpeed.verticalGLoad= OnSpeedArray[6]; \n"
-"   OnSpeed.lateralGLoad= OnSpeedArray[7]; \n"
-"   OnSpeed.alphaVA= OnSpeedArray[8]; \n"
-"   OnSpeed.LDmax= OnSpeedArray[9]; \n"
-"   OnSpeed.OnspeedFast= OnSpeedArray[10]; \n"
-"   OnSpeed.OnspeedSlow= OnSpeedArray[11]; \n"
-"   OnSpeed.OnspeedWarn= OnSpeedArray[12]; \n"
-"   OnSpeed.flapsPos= OnSpeedArray[13]; \n"
-"   OnSpeed.coeffP= OnSpeedArray[14]; \n"
-"   OnSpeed.dataMark= OnSpeedArray[15]; \n"
-"   OnSpeed.CRC= OnSpeedArray[16]; \n"
-"   var crc_string=OnSpeed.AOA+','+OnSpeed.Pitch+','+OnSpeed.Roll+','+OnSpeed.IAS+','+OnSpeed.PAlt+','+OnSpeed.verticalGLoad+','+OnSpeed.lateralGLoad+','+OnSpeed.alphaVA+','+OnSpeed.LDmax+','+OnSpeed.OnspeedFast+','+OnSpeed.OnspeedSlow+','+OnSpeed.OnspeedWarn+','+OnSpeed.flapsPos+','+OnSpeed.coeffP+','+OnSpeed.dataMark\n"
+"   OnSpeed.TAS= OnSpeedArray[5]; \n"
+"   OnSpeed.OAT= OnSpeedArray[6]; \n"
+"   OnSpeed.PAlt= OnSpeedArray[7]; \n"
+"   OnSpeed.verticalGLoad= OnSpeedArray[8]; \n"
+"   OnSpeed.lateralGLoad= OnSpeedArray[9]; \n"
+"   OnSpeed.alphaVA= OnSpeedArray[10]; \n"
+"   OnSpeed.LDmax= OnSpeedArray[11]; \n"
+"   OnSpeed.OnspeedFast= OnSpeedArray[12]; \n"
+"   OnSpeed.OnspeedSlow= OnSpeedArray[13]; \n"
+"   OnSpeed.OnspeedWarn= OnSpeedArray[14]; \n"
+"   OnSpeed.flapsPos= OnSpeedArray[15]; \n"
+"   OnSpeed.coeffP= OnSpeedArray[16]; \n"
+"   OnSpeed.dataMark= OnSpeedArray[17]; \n"
+"   OnSpeed.CRC= OnSpeedArray[18]; \n"
+"   var crc_string=OnSpeed.AOA+','+OnSpeed.Pitch+','+OnSpeed.Roll+','+OnSpeed.IAS+','+OnSpeed.TAS+','+OnSpeed.OAT+','+OnSpeed.PAlt+','+OnSpeed.verticalGLoad+','+OnSpeed.lateralGLoad+','+OnSpeed.alphaVA+','+OnSpeed.LDmax+','+OnSpeed.OnspeedFast+','+OnSpeed.OnspeedSlow+','+OnSpeed.OnspeedWarn+','+OnSpeed.flapsPos+','+OnSpeed.coeffP+','+OnSpeed.dataMark\n"
 "   console.log(\"CRC\",crc_string);\n"
 "   var crc_calc=0;\n"
 "   for (i=0;i<crc_string.length;i++)\n"
@@ -451,6 +462,8 @@ void handleLive()
 "    // CRC ok, use values\n"
 "    AOA=(OnSpeed.AOA*smoothingAlpha+AOA*(1-smoothingAlpha)).toFixed(2);\n"
 "    IAS=(OnSpeed.IAS*smoothingAlpha+IAS*(1-smoothingAlpha)).toFixed(2);\n"
+"    TAS=(OnSpeed.TAS*smoothingAlpha+TAS*(1-smoothingAlpha)).toFixed(2);\n"
+"    OAT=(OnSpeed.OAT*smoothingAlpha+OAT*(1-smoothingAlpha)).toFixed(2);\n"
 "    PAlt=(OnSpeed.PAlt*smoothingAlpha+PAlt*(1-smoothingAlpha)).toFixed(2);\n"
 "    GLoad=(OnSpeed.verticalGLoad*smoothingAlpha+GLoad*(1-smoothingAlpha)).toFixed(2);\n"
 "    GLoadLat=(OnSpeed.lateralGLoad*smoothingAlpha+GLoadLat*(1-smoothingAlpha)).toFixed(2);\n"
@@ -501,6 +514,7 @@ void handleLive()
 "       {\n"
 "       if (AOA > -20) document.getElementById(\"aoa\").innerHTML=AOA; else document.getElementById(\"aoa\").innerHTML='N/A';\n"
 "       document.getElementById(\"ias\").innerHTML=IAS +' kts';\n"
+"       document.getElementById(\"tas\").innerHTML=TAS +' kts';\n"
 "       document.getElementById(\"palt\").innerHTML=PAlt+' ft';\n"
 "       document.getElementById(\"gload\").innerHTML=GLoad+' G';\n"
 "       document.getElementById(\"gloadLat\").innerHTML=GLoadLat+' G';\n"
@@ -508,6 +522,7 @@ void handleLive()
 "       document.getElementById(\"roll\").innerHTML=RollAngle+'&#176;';\n"
 "       document.getElementById(\"datamark\").innerHTML=OnSpeed.dataMark;\n"
 "       document.getElementById(\"flapspos\").innerHTML=OnSpeed.flapsPos;\n"
+"       document.getElementById(\"oat\").innerHTML=OAT +' C';\n"
 "       lastDisplay=Date.now(); \n"
 "   }\n"
 "   \n"
@@ -693,6 +708,8 @@ void handleLive()
 "  <div id=\"datafields\"></span>\n"
 "    AOA: <span id=\"aoa\"></span> <br>\n"
 "    IAS: <span id=\"ias\"></span> <br>\n"
+"    TAS: <span id=\"tas\"></span> <br>\n"
+"    OAT: <span id=\"oat\"></span> <br>\n"
 "    P Alt: <span id=\"palt\"></span> <br>\n"
 "    Vert G: <span id=\"gload\"></span> <br>\n"
 "    Lat G: <span id=\"gloadLat\"></span> <br>\n"
@@ -1121,6 +1138,8 @@ if (server.hasArg("boxtopOrientation")) boxtopOrientation=server.arg("boxtopOrie
 if (server.hasArg("readEfisData") && server.arg("readEfisData")=="1") readEfisData=true; else readEfisData=false;
 // read efis Type
 if (server.hasArg("efisType")) efisType=server.arg("efisType");
+// read efis Port
+if (server.hasArg("efisPort")) efisPort=server.arg("efisPort");
 // read volume control
 if (server.hasArg("volumeControl") && server.arg("volumeControl")=="1") volumeControl=true; else volumeControl=false;
 //read volumePercent
@@ -1145,6 +1164,10 @@ if (server.hasArg("vnoChimeInterval")) vnoChimeInterval=server.arg("vnoChimeInte
 if (server.hasArg("serialOutFormat")) serialOutFormat=server.arg("serialOutFormat");
 //serialOutPort
 if (server.hasArg("serialOutPort")) serialOutPort=server.arg("serialOutPort");
+//readOat
+if (server.hasArg("readOat")&& (server.arg("readOat")=="1")) readOat=true; else readOat=false;
+//oatSensorType
+if (server.hasArg("oatSensorType")) oatSensorType=server.arg("oatSensorType");
  
 // sdLogging
 if (server.hasArg("sdLogging") && server.arg("sdLogging")=="1") sdLoggingConfig=true; else sdLoggingConfig=false;
@@ -1594,6 +1617,13 @@ page+="<div class=\"content-container\">\
                   <option value=\"AEROVONICS\""; if (efisType=="AEROVONICS") page+=" selected"; page+=">Aerovonics</option>\
                   <option value=\"MGL\""; if (efisType=="MGL") page+=" selected"; page+=">MGL iEFIS</option>\
                 </select>\
+              </div>\
+              <div class=\"form-divs flex-col-6 efisportsetting\">\
+                <label for=\"id_efisPort\">EFIS Port</label>\
+                <select id=\"id_efisPort\" name=\"efisPort\">\
+                  <option value=\"Serial2\""; if (efisPort=="Serial2") page+=" selected"; page+=">Serial 2 (RS-232 - pin 4)</option>\
+                  <option value=\"Serial3\""; if (efisPort=="Serial3") page+=" selected"; page+=">Serial 3 (RS-232 - pin 2)</option>\                  
+                </select>\
               </div>";          
               
               // volume control
@@ -1716,15 +1746,29 @@ page+="<div class=\"content-container\">\
                 <select id=\"id_serialOutFormat\" name=\"serialOutFormat\">\
                   <option value=\"G3X\""; if (serialOutFormat=="G3X") page+=" selected"; page+=">Garmin G3X</option>\
                   <option value=\"ONSPEED\""; if (serialOutFormat=="ONSPEED" || serialOutFormat=="") page+=" selected"; page+=">OnSpeed</option>\
+                  <option value=\"ALTENCODER\""; if (serialOutFormat=="ALTENCODER" || serialOutFormat=="") page+=" selected"; page+=">Altitude Encoder (Trimble-Garmin)</option>\
                 </select>\
               </div>";
               page+="<div class=\"form-divs flex-col-6\">\
                 <label for=\"id_serialOutPort\">Serial out port</label>\
                 <select id=\"id_serialOutPort\" name=\"serialOutPort\">\
-                  <option value=\"NONE\""; if (serialOutPort=="NONE") page+=" selected"; page+=">None</option>\
                   <option value=\"Serial1\""; if (serialOutPort=="Serial1") page+=" selected"; page+=">Serial 1 (TTL - pin 12, v2 only!)</option>\
                   <option value=\"Serial3\""; if (serialOutPort=="Serial3") page+=" selected"; page+=">Serial 3 (RS232 - pin 12)</option>\
                   <option value=\"Serial5\""; if (serialOutPort=="Serial5") page+=" selected"; page+=">Serial 5 (TTL - pin 9)</option>\
+                </select>\
+              </div>";
+              // oat selection
+              page+="<div class=\"form-divs flex-col-6\">\
+                <label for=\"id_readOat\">Read OAT</label>\
+                <select id=\"id_readOat\" name=\"readOat\">\
+                  <option value=\"1\""; if (readOat) page+=" selected"; page+=">Enabled</option>\
+                  <option value=\"0\""; if (!readOat) page+=" selected"; page+=">Disabled</option>\
+                </select>\
+              </div>";
+              page+="<div class=\"form-divs flex-col-6 oatsensortypesetting\">\
+                <label for=\"id_oatSensorType\">OAT Sensor Type</label>\
+                <select id=\"id_oatSensorType\" name=\"oatSensorType\">\
+                  <option value=\"UPS10981\""; if (oatSensorType=="UPS10981") page+=" selected"; page+=">Littelfuse UPS10981</option>\
                 </select>\
               </div>";
               // load config file
@@ -1763,7 +1807,7 @@ page+="<div class=\"content-container\">\
               [].forEach.call(document.querySelectorAll(\'.boomsetting\'), function (el) {el.style.display = \'none\';});\
               }\
         };";
-// hide efisType when efis data is disabled
+// hide efisType and efisPort when efis data is disabled
         page+="document.getElementById(\'id_readEfisData\').onchange = function() {\
           if (document.getElementById(\'id_readEfisData\').value==1)\
           {\
@@ -1771,6 +1815,11 @@ page+="<div class=\"content-container\">\
           } else\
               {\
               [].forEach.call(document.querySelectorAll(\'.efistypesetting\'), function (el) {el.style.visibility = \'hidden\';});\
+              }\
+          [].forEach.call(document.querySelectorAll(\'.efisportsetting\'), function (el) {el.style.visibility = \'visible\';});\
+          } else\
+              {\
+              [].forEach.call(document.querySelectorAll(\'.efisportsetting\'), function (el) {el.style.visibility = \'hidden\';});\
               }\
         };";
 // hide volume levels and show default volume when volume control is disabled          
@@ -1859,8 +1908,7 @@ page+="<div class=\"content-container\">\
                            }\
               }\
          </script>";
-         
-
+		 
 // add html footer
    page+=pageFooter;
    server.send(200, "text/html", page);
@@ -2319,18 +2367,18 @@ Serial.setDebugOutput(false);
   }, []() {
     HTTPUpload& upload = server.upload();
    if (upload.status == UPLOAD_FILE_START) {
-      //Serial.printf("Update: %s\n", upload.filename.c_str());
+      Serial.printf("Update: %s\n", upload.filename.c_str());
       if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { //start with max available size
-        //Update.printError(Serial);
+        Update.printError(Serial);
       }
     } else if (upload.status == UPLOAD_FILE_WRITE) {
       /* flashing firmware to ESP*/
       if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-        //Update.printError(Serial);
+        Update.printError(Serial);
       }
     } else if (upload.status == UPLOAD_FILE_END) {
       if (Update.end(true)) { //true to set the size to the current progress
-        //Serial.printf("Update Success: %u\nRebooting...\n", upload.totalSize);
+        Serial.printf("Update Success: %u\nRebooting...\n", upload.totalSize);
       } else {
         //Update.printError(Serial);
       }

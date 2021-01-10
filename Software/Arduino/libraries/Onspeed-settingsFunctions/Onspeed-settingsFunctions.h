@@ -182,7 +182,6 @@ configString+=makeConfig("CAS_CURVE",curve2string(casCurve));
 
 configString+=makeConfig("PORTS_ORIENTATION",portsOrientation);
 configString+=makeConfig("BOX_TOP_ORIENTATION",boxtopOrientation);
-configString+=makeConfig("EFISTYPE",efisType);
 
 // biases
 configString+=makeConfig("PFWD_BIAS",String(pFwdBias));
@@ -197,6 +196,8 @@ configString+=makeConfig("PITCH_BIAS",floatToString(pitchBias));
 // serial inputs
 configString+=makeConfig("BOOM",String(readBoom));
 configString+=makeConfig("SERIALEFISDATA",String(readEfisData));
+configString+=makeConfig("EFISTYPE",efisType);
+configString+=makeConfig("EFISPORT",efisPort);
 
 // load limit
 configString+=makeConfig("LOADLIMIT",String(loadLimit));
@@ -209,6 +210,10 @@ configString+=makeConfig("VNO_CHIME_ENABLED",String(vnoChimeEnabled));
 // serial out
 configString+=makeConfig("SERIALOUTFORMAT",serialOutFormat);
 configString+=makeConfig("SERIALOUTPORT",serialOutPort);
+
+// oat sensor
+configString+=makeConfig("READOAT",String(readOat));
+configString+=makeConfig("OATSENSORTYPE",oatSensorType);
 
 // sdLogging
 configString+=makeConfig("SDLOGGING",String(sdLoggingConfig));    
@@ -266,7 +271,6 @@ casCurve=parseCurveCSV(getConfigValue(configString,"CAS_CURVE"));
 
 portsOrientation=getConfigValue(configString,"PORTS_ORIENTATION");
 boxtopOrientation=getConfigValue(configString,"BOX_TOP_ORIENTATION");
-efisType=getConfigValue(configString,"EFISTYPE");
 
 // biases
 pFwdBias=getConfigValue(configString,"PFWD_BIAS").toInt();
@@ -280,6 +284,8 @@ pitchBias=stringToFloat(getConfigValue(configString,"PITCH_BIAS"));
 // serial inputs
 readBoom=stringToBoolean(getConfigValue(configString,"BOOM"));
 readEfisData=stringToBoolean(getConfigValue(configString,"SERIALEFISDATA"));
+efisType=getConfigValue(configString,"EFISTYPE");
+efisPort=getConfigValue(configString,"EFISPORT");
 
 // serial output
 serialOutFormat=getConfigValue(configString,"SERIALOUTFORMAT");
@@ -296,6 +302,10 @@ vnoChimeEnabled=stringToBoolean(getConfigValue(configString,"VNO_CHIME_ENABLED")
 // SD card logging    
 sdLoggingConfig=stringToBoolean(getConfigValue(configString,"SDLOGGING"));
 sdLogging=sdLoggingConfig; 
+
+// OAT Sensor
+readOat=getConfigValue(configString,"READOAT");
+oatSensorType=getConfigValue(configString,"OATSENSORTYPE");
 return true;  
 }
 
