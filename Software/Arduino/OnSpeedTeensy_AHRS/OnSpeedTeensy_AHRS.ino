@@ -158,7 +158,7 @@ int accSmoothing=10; // accelerometer smoothing, Simple moving average
 int ahrsSmoothing=100; // ahrs smoothing, Exponential
 int airspeedSmoothing=50; // airspeed smoothing, 50 sample moving average for 238hz
 int serialDisplaySmoothing=200; // smoothing serial display data (LateralG, verticalG, IAS)
-
+int oatSmoothing=10;
 
 intArray flapDegrees;
 intArray flapPotPositions;
@@ -477,6 +477,7 @@ volatile float smoothedIAS=0.0;                    // smoothed airspeed
 volatile float prevIAS=0.0;                        // previous IAS sample (used to calculate acceleartion)
 volatile float Palt=0.00;                          // pressure altitude
 float currentRangeSweepValue=RANGESWEEP_LOW_AOA;
+float smoothedOat=0.0; // smoothed OAT from analog sensor
 RunningMedian P45Median(pressureSmoothing);
 RunningMedian PfwdMedian(pressureSmoothing);
 RunningAverage PfwdAvg(10);
@@ -488,6 +489,7 @@ RunningAverage aFwdAvg(accSmoothing);
 RunningAverage aVertCompAvg(accSmoothing);
 RunningAverage aLatCompAvg(accSmoothing);
 RunningAverage aFwdCompAvg(accSmoothing);
+RunningAverage analogOatAvg(oatSmoothing);
 
 
 // vars for converting AOA scale value to PPS scale value.
@@ -1126,7 +1128,6 @@ serialCmdChar = Serial.read();
                                                                   long P45Total=0;
                                                                   for (int i=1;i<=1000;i++)
                                                                       {
-                                                                      if (i%250==0) watchdogRefresh();
                                                                       PfwdTotal+=GetPressurePfwd();
                                                                       P45Total+=GetPressureP45();
                                                                       delay(10);
@@ -1235,11 +1236,12 @@ if (millis()-looptime > 1000)
           //check for efis stream, restart port of not receiving data for half second
           if (millis()-lastReceivedEfisTime>=EFIS_DATA_TIMEOUT)
              {
-             Serial3.end();             
-             Serial3.begin(BAUDRATE_EFIS);
+             serialIn->end();             
+             serialIn->begin(BAUDRATE_EFIS);
              lastReceivedEfisTime=millis();// reset timer 
             
              #ifdef EFISDATADEBUG
+             Serial.println("\n Efis data timeout. Restarting serial port 3");
              Serial.println("\n Efis data timeout. Restarting serial port 3");
              Serial.printf("\nEfis last transmit: %i", millis()-lastReceivedEfisTime);
              #endif
@@ -1266,6 +1268,17 @@ if (millis()-looptime > 1000)
       loopcount=0;
       charsreceived=0;     
       }
+
+      if (readOat)
+         {
+         // read OAT
+         getOat();
+
+         #ifdef BARO
+         // calculate TAS
+         calcTas(GetStaticPressure());
+         #endif
+         }
 
 // SD card write once/sec
 if (millis()-lastSDWrite>=1000)
@@ -1461,10 +1474,14 @@ if (serialOutPort!="NONE" && millis()-serialoutLastUpdate>200) // update every 2
                                   noInterrupts();
                                   if (PaltSmoothed==0) PaltSmoothed=Palt; else PaltSmoothed=Palt * smoothingAlpha/10+ (1-smoothingAlpha/10)*PaltSmoothed; // increased smoothing needed
                                   interrupts();
-                                  sprintf(altEncoderString,"ALT %05i", int(PaltSmoothed));
+                                  sprintf(altEncoderString,"ALT %05i", efisPalt);
                                   
                                   if (serialOutPort=="Serial3")
-                                      {                   
+                                      {                  
+									  if (!Serial3) 
+										 {
+										 Serial3.begin(9600);
+										 }
                                       Serial3.println(altEncoderString);
                                       }
                                   serialoutLastUpdate=millis();
@@ -1813,27 +1830,27 @@ if (efisType=="GARMING5")
                                    parseString=efisBufferString.substring(14, 16);
                                    if (parseString!="__") gpsLat=parseString.toFloat(); // degrees
                                    parseString=efisBufferString.substring(16, 21);
-                                   if (parseString!="_____") gpsLat=gpsLat+(parseString.toFloat()/1000); // deg.minutes
+                                   if (parseString!="_____") gpsLat=gpsLat+((parseString.toFloat()/1000)/60); // deg.minutes
                                    parseString=efisBufferString.substring(22, 25);
                                    if (parseString!="___") gpsLong=parseString.toFloat(); // degress
                                    parseString=efisBufferString.substring(25, 30);
-                                   if (parseString!="_____") gpsLong=gpsLong+(parseString.toFloat()/1000); // deg.minutes
+                                   if (parseString!="_____") gpsLong=gpsLong+((parseString.toFloat()/1000)/60); // deg.minutes
                                    parseString=efisBufferString.substring(30, 31);
                                    if (parseString!="_") gpsPosStatus=parseString; // g = 2D; G = 3D; d = 2D diff; D = 3D diff; S = simulated       
                                    parseString=efisBufferString.substring(37, 40);
                                    if (parseString!="______") gpsAlt=parseString.toInt(); // m                           
                                    parseString=efisBufferString.substring(41, 45);
-                                   if (parseString!="___") gpsVelocityEW=parseString.toFloat(); // m/s
+                                   if (parseString!="___") gpsVelocityEW=parseString.toFloat()/10; // m/s
                                    parseString=efisBufferString.substring(46, 50);
-                                   if (parseString!="______") gpsVelocityNS=parseString.toFloat(); // m/s
+                                   if (parseString!="______") gpsVelocityNS=parseString.toFloat()/10; // m/s
                                    parseString=efisBufferString.substring(51, 55);
-                                   if (parseString!="____") gpsVerticalVelocity=parseString.toFloat(); // m/s
+                                   if (parseString!="____") gpsVerticalVelocity=parseString.toFloat()/100; // m/s
                                    efisTimestamp=millis();
                                    
                                    if (efisBufferString.substring(40, 41) == 'W') gpsVelocityEW = gpsVelocityEW * -1;
                                    if (efisBufferString.substring(45, 46) == 'S') gpsVelocityNS = gpsVelocityNS * -1;
                                    gpsVelocity = sqrt((gpsVelocityEW*gpsVelocityEW)+(gpsVelocityNS*gpsVelocityNS)); // velocity in m/s
-                                   gpsTrack = atan2(gpsVelocityEW, gpsVelocityNS)*57.2958; // track in degree
+                                   gpsTrack = calcTrack(gpsVelocityEW, gpsVelocityNS); // track in degrees from velocity components
                                    if (efisBufferString.substring(50, 51) == 'D') gpsVerticalVelocity = gpsVerticalVelocity * -1;
 
                                    gpsDate=efisBufferString.substring(1, 3)+"/"+efisBufferString.substring(3,5)+"/"+efisBufferString.substring(5,7);
@@ -2756,12 +2773,6 @@ if (PfwdPascal>0)
     IAS=curveCalc(IAS,casCurve);   
     }
     else IAS=0;
-
-// read OAT
-getOat();
-
-// calculate TAS
-calcTas(Pstatic);
 
 unsigned long timeStamp=millis(); // save timestamp for logging
 updateTones();
@@ -3770,6 +3781,9 @@ void getOat()
   reading = -20.14*log(reading)+211.7;
   analogOat = 0.0031*(reading*reading)+0.9713*reading-2.3687; // Celsius
 
+  analogOatAvg.addValue(analogOat);
+  smoothedOat=analogOatAvg.getFastAverage();
+
   //analogOat = (analogOat*1.8) + 32;
 }
 
@@ -3780,8 +3794,17 @@ void calcTas(float Pstatic)
 
   oatKelvin=analogOat + 273.15;
 
-  rho=(Pstatic*100)/(R_AIR+oatKelvin);
-  calculatedTas = IAS * sqrt(RHO_0/rho); // TAS in IAS units.
+  rho=(Pstatic*100)/(R_AIR*oatKelvin);
+  calculatedTas = smoothedIAS * sqrt(RHO_0/rho); // TAS in IAS units.
+}
+
+float calcTrack(float gpsVelX, float gpsVelY)
+{
+  float track=0.0;
+  track=450-(57.2958*atan2(gpsVelY, gpsVelX));
+  if (track>=360) track-=360;
+
+  return track;
 }
 
 void enableWatchdog()
